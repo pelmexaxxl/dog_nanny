@@ -4,6 +4,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'audio_classifier.dart';
 import 'dart:async';
 import 'dart:math';
+import 'monitoring.dart';
 
 void main() => runApp(DogNannyApp());
 
@@ -25,7 +26,8 @@ class MonitorScreen extends StatefulWidget {
 
 class _MonitorScreenState extends State<MonitorScreen> {
   final AudioClassifier _classifier = AudioClassifier();
-  
+  final AppMonitoring _monitoring = AppMonitoring();
+
   StreamSubscription<List<int>>? _micStream;
   bool _isRecording = false;
   String _status = "Готов к мониторингу";
@@ -35,7 +37,8 @@ class _MonitorScreenState extends State<MonitorScreen> {
   
   List<int> _audioBuffer = [];
   DateTime? _lastBarkTime;
-  List<String> _history = [];
+  List<Map<String, dynamic>> _history = []; // Хранит объекты
+  int _falsePositives = 0; // Счётчик удалённых
   
   String _freqInfo = "";
   double _currentDb = 0.0;
@@ -45,6 +48,7 @@ class _MonitorScreenState extends State<MonitorScreen> {
   void initState() {
     super.initState();
     _initClassifier();
+    _monitoring.startSession();
   }
 
   Future<void> _initClassifier() async {
@@ -116,12 +120,15 @@ class _MonitorScreenState extends State<MonitorScreen> {
         setState(() {
           _isRecording = true;
           _barkCount = 0;
+          _falsePositives = 0; // ДОБАВЬ
           _history.clear();
           _audioBuffer.clear();
           _status = "Слушаю...";
         });
+
       } catch (e) {
         print('Ошибка: $e');
+        _monitoring.logError(e.toString(), StackTrace.current.toString());
         setState(() => _status = "Ошибка: $e");
       }
     }
@@ -186,6 +193,12 @@ class _MonitorScreenState extends State<MonitorScreen> {
       _lastBarkTime = now;
       _barkCount++;
       
+      _monitoring.logDetection(true, {
+        'method': result['method'],
+        'confidence': result['confidence'],
+        'dominant_freq': result['dominantFreq'],
+      });
+
       setState(() {
         _status = "ЛАЙ ОБНАРУЖЕН!";
         _freqInfo = "Частота: ${result['dominantFreq']} Гц, Энергия: ${result['energy']}";
@@ -208,8 +221,21 @@ class _MonitorScreenState extends State<MonitorScreen> {
   void _addToHistory(String event) {
     setState(() {
       var time = DateTime.now();
-      _history.insert(0, "${time.hour}:${time.minute.toString().padLeft(2, '0')}:${time.second.toString().padLeft(2, '0')} - $event");
-      if (_history.length > 10) _history.removeLast();
+      _history.insert(0, {
+        'time': "${time.hour}:${time.minute.toString().padLeft(2, '0')}:${time.second.toString().padLeft(2, '0')}",
+        'event': event,
+        'id': DateTime.now().millisecondsSinceEpoch, // Уникальный ID
+      });
+      if (_history.length > 20) _history.removeLast(); // Увеличил лимит
+    });
+  }
+
+  void _removeFromHistory(int index) {
+    setState(() {
+      _history.removeAt(index);
+      _barkCount--; // Уменьшаем счётчик
+      _falsePositives++; // Увеличиваем ложные
+      _monitoring.logFalsePositive();
     });
   }
 
@@ -217,7 +243,82 @@ class _MonitorScreenState extends State<MonitorScreen> {
   void dispose() {
     _micStream?.cancel();
     _classifier.dispose();
+    _monitoring.endSession();
     super.dispose();
+  }
+
+  void _showMonitoringReport() {
+    final report = _monitoring.getReport();
+    
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(Icons.analytics, color: Colors.purple),
+            SizedBox(width: 8),
+            Text('Отчёт мониторинга'),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildReportRow('Сессий', '${report['session_count']}'),
+              Divider(),
+              _buildReportRow('Всего детекций', '${report['total_detections']}'),
+              _buildReportRow('Подтверждённых', '${report['confirmed_detections']}'),
+              _buildReportRow('Ложных', '${report['false_positives']}'),
+              Divider(),
+              _buildReportRow('Точность', '${report['accuracy_rate']}%'),
+              _buildReportRow('FP Rate', '${report['false_positive_rate']}%'),
+              Divider(),
+              _buildReportRow('Crashes', '${report['crashes']}'),
+              SizedBox(height: 10),
+              Text(
+                'Метрики сохранены локально',
+                style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              _monitoring.resetMetrics();
+              Navigator.pop(context);
+              setState(() {
+                _barkCount = 0;
+                _falsePositives = 0;
+                _history.clear();
+              });
+            },
+            child: Text('Сбросить'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Закрыть'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReportRow(String label, String value) {
+    return Padding(
+      padding: EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: TextStyle(fontSize: 14)),
+          Text(
+            value,
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -425,15 +526,85 @@ class _MonitorScreenState extends State<MonitorScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('История:', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+                      Text('История лаев:', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
                       SizedBox(height: 8),
-                      ..._history.map((e) => Padding(
-                        padding: EdgeInsets.symmetric(vertical: 2),
-                        child: Text(e, style: TextStyle(fontSize: 12, color: Colors.grey[800])),
-                      )).toList(),
+                      ..._history.asMap().entries.map((entry) {
+                        int index = entry.key;
+                        var item = entry.value;
+                        return Container(
+                          margin: EdgeInsets.only(bottom: 5),
+                          padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: Colors.grey[300]!),
+                          ),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  '${item['time']} - ${item['event']}',
+                                  style: TextStyle(fontSize: 12, color: Colors.grey[800]),
+                                ),
+                              ),
+                              IconButton(
+                                icon: Icon(Icons.delete_outline, color: Colors.red, size: 20),
+                                padding: EdgeInsets.zero,
+                                constraints: BoxConstraints(),
+                                onPressed: () => _removeFromHistory(index),
+                              ),
+                            ],
+                          ),
+                        );
+                      }).toList(),
                     ],
                   ),
                 ),
+              SizedBox(height: 20),
+
+              // СТАТИСТИКА
+              Container(
+                padding: EdgeInsets.all(15),
+                decoration: BoxDecoration(
+                  color: Colors.blue[50],
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.blue[200]!, width: 2),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.analytics, color: Colors.blue[700], size: 20),
+                        SizedBox(width: 8),
+                        Text('Статистика', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.blue[900])),
+                      ],
+                    ),
+                    SizedBox(height: 10),
+                    _buildStatRow('Подтверждённых лаев:', '$_barkCount', Colors.green),
+                    _buildStatRow('Ложных (удалено):', '$_falsePositives', Colors.red),
+                    if (_barkCount + _falsePositives > 0)
+                      _buildStatRow(
+                        'Точность:',
+                        '${((_barkCount / (_barkCount + _falsePositives)) * 100).toStringAsFixed(1)}%',
+                        Colors.blue,
+                      ),
+                  ],
+                ),
+              ),
+
+              SizedBox(height: 15),
+
+              // КНОПКА ОТЧЁТА МОНИТОРИНГА
+              ElevatedButton.icon(
+                onPressed: _showMonitoringReport,
+                icon: Icon(Icons.analytics_outlined),
+                label: Text('Отчёт мониторинга'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.purple[600],
+                  foregroundColor: Colors.white,
+                ),
+              ),
             ],
           ),
         ),
@@ -463,6 +634,25 @@ class _MonitorScreenState extends State<MonitorScreen> {
             ),
           ),
         ),
+      ),
+    );
+  }
+  Widget _buildStatRow(String label, String value, Color color) {
+    return Padding(
+      padding: EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: TextStyle(fontSize: 13, color: Colors.grey[700])),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
+          ),
+        ],
       ),
     );
   }

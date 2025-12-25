@@ -1,0 +1,81 @@
+@startuml Dog Nanny Classes
+
+skinparam classBackgroundColor #E3F2FD
+skinparam classBorderColor #1976D2
+
+title Dog Nanny - Class Diagram
+
+class MonitorScreen {
+    - _classifier: AudioClassifier
+    - _monitoring: AppMonitoring
+    - _micStream: StreamSubscription
+    - _isRecording: bool
+    - _barkCount: int
+    - _falsePositives: int
+    - _currentDb: double
+    - _threshold: double
+    - _history: List<Map>
+    - _mode: DetectionMode
+    + toggleRecording()
+    + switchMode()
+    + removeFromHistory()
+    + showMonitoringReport()
+}
+
+enum DetectionMode {
+    economical
+    precise
+}
+
+class AudioClassifier {
+    - _interpreter: Interpreter
+    - _mode: DetectionMode
+    + initialize()
+    + setMode(mode)
+    + classify(pcmData): Map
+    + analyzeFrequencies(pcmData): Map
+    - _simpleFFT(samples): List
+    - _prepareWaveform(pcmData): List
+}
+
+class AppMonitoring {
+    - _totalDetections: int
+    - _confirmedDetections: int
+    - _falsePositives: int
+    - _crashes: int
+    - _detectionLog: List
+    - _errorLog: List
+    + startSession()
+    + endSession()
+    + logDetection(isDogBark, metadata)
+    + logFalsePositive()
+    + logError(error, stackTrace)
+    + getReport(): Map
+    + resetMetrics()
+}
+
+MonitorScreen --> AudioClassifier : uses
+MonitorScreen --> AppMonitoring : uses
+MonitorScreen --> DetectionMode : uses
+AudioClassifier --> DetectionMode : uses
+
+note right of AudioClassifier
+    FFT Analysis:
+    - Dominant frequency
+    - Spectral centroid
+    - Energy calculation
+    
+    ML Inference:
+    - YAMNet model
+    - Dog/Bark classification
+end note
+
+note right of AppMonitoring
+    Metrics:
+    - Accuracy rate
+    - False positive rate
+    - Crash tracking
+    - Session duration
+end note
+
+@enduml

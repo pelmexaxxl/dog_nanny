@@ -1,0 +1,68 @@
+@startuml Dog Nanny Architecture
+
+skinparam componentStyle rectangle
+skinparam backgroundColor #FFFFFF
+skinparam componentBackgroundColor #E3F2FD
+skinparam packageBackgroundColor #F5F5F5
+skinparam noteBorderColor #BDBDBD
+skinparam noteBackgroundColor #FFF9C4
+
+title Dog Nanny - Component Architecture
+
+package "UI Layer" #E8EAF6 {
+    component [MonitorScreen] as UI
+    
+    note right of UI
+        main.dart
+        - Volume indicator
+        - Threshold control
+        - Mode switcher
+        - Event history
+        - Statistics display
+    end note
+}
+
+package "Business Logic Layer" #E1F5FE {
+    component [AudioClassifier] as Classifier
+    component [AppMonitoring] as Monitor
+    
+    note right of Classifier
+        audio_classifier.dart
+        - FFT Analysis
+        - Frequency extraction
+        - ML Inference
+        - Detection logic
+    end note
+    
+    note right of Monitor
+        monitoring.dart
+        - Session tracking
+        - Metrics logging
+        - Error handling
+        - Report generation
+    end note
+}
+
+package "Data Layer" #F1F8E9 {
+    database "mic_stream\nPCM Audio" as MicStream
+    storage "YAMNet\nTFLite Model" as Model
+    storage "Monitoring\nMetrics File" as MetricsFile
+    
+    note right of MicStream
+        16kHz, Mono
+        Int16 samples
+    end note
+    
+    note right of Model
+        assets/models/yamnet.tflite
+        5MB, 521 classes
+    end note
+}
+
+UI -down-> Classifier : classify(audioBuffer)
+UI -down-> Monitor : logDetection()
+Classifier -down-> MicStream : read samples
+Classifier -down-> Model : inference()
+Monitor -down-> MetricsFile : save metrics
+
+@enduml

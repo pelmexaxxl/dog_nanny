@@ -69,3 +69,6 @@ temp_audio.*
 
 # MacOS
 .DS_Store
+
+# plantUML
+# /docs/puml
