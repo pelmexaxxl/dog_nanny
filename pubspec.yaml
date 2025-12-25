@@ -30,8 +30,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_sound: ^9.2.13
-  permission_handler: ^11.0.1
+  mic_stream: ^0.7.2
+  # record: ^4.4.4 не работает падла
+  # flutter_sound: ^9.2.13
+  permission_handler: ^11.4.0
   path_provider: ^2.1.1
   tflite_flutter: ^0.11.0
 

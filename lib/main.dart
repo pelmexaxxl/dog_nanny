@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_sound/flutter_sound.dart';
+import 'package:mic_stream/mic_stream.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'audio_classifier.dart';
+import 'dart:async';
+import 'dart:math';
 
 void main() => runApp(DogNannyApp());
 
@@ -9,7 +11,7 @@ class DogNannyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Dog Nanny',
+      title: 'Dog Nanny ML',
       theme: ThemeData(primarySwatch: Colors.blue),
       home: MonitorScreen(),
     );
@@ -22,112 +24,198 @@ class MonitorScreen extends StatefulWidget {
 }
 
 class _MonitorScreenState extends State<MonitorScreen> {
-  final FlutterSoundRecorder _recorder = FlutterSoundRecorder();
   final AudioClassifier _classifier = AudioClassifier();
   
+  StreamSubscription<List<int>>? _micStream;
   bool _isRecording = false;
   String _status = "Готов к мониторингу";
   int _barkCount = 0;
-  double _threshold = 65.0; // Порог в дБ
-  double _currentDb = 0.0;
+  
+  DetectionMode _mode = DetectionMode.economical;
+  
+  List<int> _audioBuffer = [];
+  DateTime? _lastBarkTime;
   List<String> _history = [];
+  
+  String _freqInfo = "";
+  double _currentDb = 0.0;
+  double _threshold = 70.0;
 
   @override
   void initState() {
     super.initState();
-    _initRecorder();
     _initClassifier();
-  }
-
-  Future<void> _initRecorder() async {
-    var status = await Permission.microphone.request();
-    if (status != PermissionStatus.granted) {
-      setState(() {
-        _status = "⚠️ Нет доступа к микрофону";
-      });
-      return;
-    }
-    await _recorder.openRecorder();
-    print('✅ Recorder готов');
   }
 
   Future<void> _initClassifier() async {
     await _classifier.initialize();
+    _classifier.setMode(_mode);
+  }
+
+  void _switchMode(DetectionMode mode) {
+    setState(() {
+      _mode = mode;
+      _classifier.setMode(mode);
+    });
   }
 
   void _toggleRecording() async {
     if (_isRecording) {
-      await _recorder.stopRecorder();
+      await _micStream?.cancel();
       setState(() {
         _isRecording = false;
         _status = "Остановлено. Всего лаев: $_barkCount";
       });
     } else {
+      var status = await Permission.microphone.request();
+      if (status != PermissionStatus.granted) {
+        setState(() => _status = "Нет доступа к микрофону");
+        return;
+      }
+      
       try {
-        await _recorder.startRecorder(
-          toFile: 'temp_audio.aac',
-          codec: Codec.aacADTS,
-          numChannels: 1,
+        Stream<List<int>> stream = await MicStream.microphone(
           sampleRate: 16000,
+          channelConfig: ChannelConfig.CHANNEL_IN_MONO,
+          audioFormat: AudioFormat.ENCODING_PCM_16BIT,
         );
         
-        // Обновление каждые 300мс
-        _recorder.setSubscriptionDuration(Duration(milliseconds: 300));
-        
-        // Слушаем поток аудио
-        _recorder.onProgress!.listen((event) {
-          double decibels = event.decibels ?? 0;
+        _micStream = stream.listen((bytes) {
+          // print('Получено байт: ${bytes.length}');
           
-          setState(() {
-            _currentDb = decibels;
+          // КОНВЕРТИРУЕМ БАЙТЫ В INT16 PCM
+          List<int> samples = [];
+          for (int i = 0; i < bytes.length - 1; i += 2) {
+            // Little-endian Int16
+            int sample = (bytes[i] & 0xFF) | ((bytes[i + 1] & 0xFF) << 8);
             
-            // Проверка порога
-            if (decibels > _threshold) {
-              _barkCount++;
-              _status = "🐕 ЛАЙ ОБНАРУЖЕН!";
-              _addToHistory("Лай #$_barkCount - ${decibels.toInt()} дБ");
-              
-              // Возвращаем обычный статус через 2 секунды
-              Future.delayed(Duration(seconds: 2), () {
-                if (_isRecording) {
-                  setState(() {
-                    _status = "🎧 Слушаю...";
-                  });
-                }
-              });
-            } else if (_isRecording && _status.contains("Слушаю")) {
-              _status = "🎧 Слушаю... ${decibels.toInt()} дБ";
+            // Преобразуем в signed
+            if (sample > 32767) {
+              sample = sample - 65536;
             }
-          });
+            
+            samples.add(sample);
+          }
+          
+          // ДИАГНОСТИКА
+          // if (samples.length >= 10) {
+          //   print('Первые 10 PCM сэмплов: ${samples.sublist(0, 10)}');
+          //   int maxSample = samples.reduce((a, b) => a.abs() > b.abs() ? a : b);
+          //   print('Максимальный PCM: $maxSample');
+          // }
+          
+          _audioBuffer.addAll(samples);
+          
+          // Каждые 0.5 сек анализируем
+          if (_audioBuffer.length >= 8000) {
+            _analyzeAudio();
+            _audioBuffer = _audioBuffer.sublist(_audioBuffer.length - 8000);
+          }
         });
-        
+                        
         setState(() {
           _isRecording = true;
           _barkCount = 0;
           _history.clear();
-          _status = "🎧 Слушаю...";
+          _audioBuffer.clear();
+          _status = "Слушаю...";
         });
       } catch (e) {
-        print('❌ Ошибка запуска: $e');
-        setState(() {
-          _status = "Ошибка: $e";
-        });
+        print('Ошибка: $e');
+        setState(() => _status = "Ошибка: $e");
       }
+    }
+  }
+
+  Future<void> _analyzeAudio() async {
+    if (_audioBuffer.length < 512) {
+      print('Буфер слишком мал: ${_audioBuffer.length}');
+      return;
+    }
+    
+    // print('Анализируем ${_audioBuffer.length} сэмплов');
+    
+    // ВЫЧИСЛЯЕМ ГРОМКОСТЬ (средняя амплитуда)
+    double sum = 0;
+    for (int sample in _audioBuffer) {
+      sum += sample.abs();
+    }
+    double avgAmplitude = sum / _audioBuffer.length;
+
+    // Логарифмическая шкала (как настоящие dB)
+    // Амплитуда 100 = 40 dБ, 1000 = 60 dB, 10000 = 80 dB
+    double db = avgAmplitude > 0 ? 20 * log(avgAmplitude) / ln10 : 0;
+
+    print('Средняя амплитуда: $avgAmplitude, dB: $db');
+
+    setState(() {
+      _currentDb = db.clamp(0, 100);
+    });
+
+    // ПРОВЕРКА ПОРОГА
+    if (_currentDb < _threshold) {
+      // print('Слишком тихо: ${_currentDb.toInt()} < $_threshold');
+      return;
+    }
+        
+    final now = DateTime.now();
+    if (_lastBarkTime != null && now.difference(_lastBarkTime!).inSeconds < 2) {
+      // print('Антидребезг');
+      return;
+    }
+    
+    var result = await _classifier.classify(_audioBuffer);
+    
+    print('Результат классификации: $result');
+
+    // ДИАГНОСТИКА: всегда показываем данные
+    setState(() {
+      _freqInfo = "Freq: ${result['dominantFreq']} Hz, E: ${result['energy']}";
+      if (result.containsKey('spectralCentroid')) {
+        _freqInfo += ", C: ${result['spectralCentroid']} Hz";
+      }
+      if (result.containsKey('freqRatio')) {
+        _freqInfo += ", R: ${result['freqRatio']}";
+      }
+      if (result.containsKey('dogScore')) {
+        _freqInfo += ", Dog: ${result['dogScore']}, Bark: ${result['barkScore']}";
+      }
+    });
+        
+    if (result['isDogBark'] == true) {
+      _lastBarkTime = now;
+      _barkCount++;
+      
+      setState(() {
+        _status = "ЛАЙ ОБНАРУЖЕН!";
+        _freqInfo = "Частота: ${result['dominantFreq']} Гц, Энергия: ${result['energy']}";
+        if (result.containsKey('mlScore')) {
+          _freqInfo += ", ML: ${result['mlScore']}";
+        }
+      });
+      
+      String method = result['method'];
+      _addToHistory("Лай #$_barkCount - $method");
+      
+      Future.delayed(Duration(seconds: 2), () {
+        if (_isRecording) {
+          setState(() => _status = "Слушаю...");
+        }
+      });
     }
   }
 
   void _addToHistory(String event) {
     setState(() {
-      _history.insert(0, "${DateTime.now().hour}:${DateTime.now().minute}:${DateTime.now().second} - $event");
-      if (_history.length > 10) {
-        _history.removeLast();
-      }
+      var time = DateTime.now();
+      _history.insert(0, "${time.hour}:${time.minute.toString().padLeft(2, '0')}:${time.second.toString().padLeft(2, '0')} - $event");
+      if (_history.length > 10) _history.removeLast();
     });
   }
 
   @override
   void dispose() {
-    _recorder.closeRecorder();
+    _micStream?.cancel();
     _classifier.dispose();
     super.dispose();
   }
@@ -136,7 +224,7 @@ class _MonitorScreenState extends State<MonitorScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('Dog Nanny 🐕'),
+        title: Text('Dog Nanny ML'),
         backgroundColor: Colors.blue[700],
       ),
       body: SingleChildScrollView(
@@ -144,60 +232,70 @@ class _MonitorScreenState extends State<MonitorScreen> {
           padding: EdgeInsets.all(20),
           child: Column(
             children: [
-              SizedBox(height: 20),
+              SizedBox(height: 10),
               
-              // Иконка микрофона
-              Icon(
-                _isRecording ? Icons.mic : Icons.mic_off,
-                size: 100,
-                color: _isRecording ? Colors.red : Colors.grey,
-              ),
-              
-              SizedBox(height: 30),
-              
-              // Статус
+              // РЕЖИМЫ ДЕТЕКЦИИ
               Container(
                 padding: EdgeInsets.all(15),
                 decoration: BoxDecoration(
-                  color: _status.contains("ЛАЙ") ? Colors.red[100] : Colors.blue[50],
-                  borderRadius: BorderRadius.circular(10),
+                  color: Colors.purple[50],
+                  borderRadius: BorderRadius.circular(15),
+                  border: Border.all(color: Colors.purple, width: 2),
                 ),
-                child: Text(
-                  _status,
-                  style: TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                    color: _status.contains("ЛАЙ") ? Colors.red[900] : Colors.blue[900],
-                  ),
-                  textAlign: TextAlign.center,
+                child: Column(
+                  children: [
+                    Text('Режим детекции', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                    SizedBox(height: 10),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        _buildModeButton('Частоты', DetectionMode.economical, Colors.green),
+                        SizedBox(width: 10),
+                        _buildModeButton('ML+Частоты', DetectionMode.precise, Colors.purple),
+                      ],
+                    ),
+                    SizedBox(height: 10),
+                    Text(
+                      _mode == DetectionMode.economical
+                          ? 'FFT анализ частот'
+                          : 'YAMNet ML + FFT',
+                      style: TextStyle(fontSize: 12, color: Colors.grey[700]),
+                    ),
+                  ],
                 ),
               ),
               
               SizedBox(height: 20),
               
-              // Текущая громкость
+              // ИНДИКАТОР ГРОМКОСТИ
               if (_isRecording)
                 Container(
-                  padding: EdgeInsets.all(10),
+                  padding: EdgeInsets.all(15),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[100],
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Colors.grey[400]!, width: 2),
+                  ),
                   child: Column(
                     children: [
-                      Text('Громкость:', style: TextStyle(fontSize: 16)),
+                      Text('Громкость:', style: TextStyle(fontSize: 14)),
                       SizedBox(height: 5),
                       Text(
                         '${_currentDb.toInt()} дБ',
                         style: TextStyle(
-                          fontSize: 32,
+                          fontSize: 28,
                           fontWeight: FontWeight.bold,
                           color: _currentDb > _threshold ? Colors.red : Colors.green,
                         ),
                       ),
+                      SizedBox(height: 8),
                       LinearProgressIndicator(
                         value: (_currentDb / 100).clamp(0.0, 1.0),
                         backgroundColor: Colors.grey[300],
                         valueColor: AlwaysStoppedAnimation<Color>(
                           _currentDb > _threshold ? Colors.red : Colors.green,
                         ),
-                        minHeight: 10,
+                        minHeight: 8,
                       ),
                     ],
                   ),
@@ -205,36 +303,73 @@ class _MonitorScreenState extends State<MonitorScreen> {
               
               SizedBox(height: 20),
               
-              // Счетчик лаев
+              // ИКОНКА МИКРОФОНА
+              Icon(
+                _isRecording ? Icons.mic : Icons.mic_off,
+                size: 100,
+                color: _isRecording ? Colors.red : Colors.grey,
+              ),
+              
+              SizedBox(height: 20),
+              
+              // СТАТУС
               Container(
-                padding: EdgeInsets.all(20),
+                padding: EdgeInsets.all(15),
+                decoration: BoxDecoration(
+                  color: _status.contains("ЛАЙ") ? Colors.red[100] : Colors.blue[50],
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Column(
+                  children: [
+                    Text(
+                      _status,
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                        color: _status.contains("ЛАЙ") ? Colors.red[900] : Colors.blue[900],
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                    if (_freqInfo.isNotEmpty) // && _status.contains("ЛАЙ"))
+                      Padding(
+                        padding: EdgeInsets.only(top: 5),
+                        child: Text(
+                          _freqInfo,
+                          style: TextStyle(fontSize: 12, color: Colors.grey[700]),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              
+              SizedBox(height: 15),
+              
+              // СЧЕТЧИК ЛАЕВ
+              Container(
+                padding: EdgeInsets.all(15),
                 decoration: BoxDecoration(
                   color: Colors.green[50],
                   borderRadius: BorderRadius.circular(10),
                   border: Border.all(color: Colors.green, width: 2),
                 ),
-                child: Column(
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Text(
-                      'Лаев обнаружено',
-                      style: TextStyle(fontSize: 16, color: Colors.green[900]),
-                    ),
-                    SizedBox(height: 5),
-                    Text(
-                      '$_barkCount',
-                      style: TextStyle(
-                        fontSize: 48,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.green[700],
-                      ),
+                    Icon(Icons.pets, color: Colors.green[700], size: 30),
+                    SizedBox(width: 10),
+                    Column(
+                      children: [
+                        Text('Лаев обнаружено', style: TextStyle(fontSize: 14, color: Colors.green[900])),
+                        Text('$_barkCount', style: TextStyle(fontSize: 36, fontWeight: FontWeight.bold, color: Colors.green[700])),
+                      ],
                     ),
                   ],
                 ),
               ),
               
-              SizedBox(height: 30),
+              SizedBox(height: 20),
               
-              // Слайдер чувствительности
+              // ПОЛЗУНОК ПОРОГА
               Container(
                 padding: EdgeInsets.all(15),
                 decoration: BoxDecoration(
@@ -243,58 +378,43 @@ class _MonitorScreenState extends State<MonitorScreen> {
                 ),
                 child: Column(
                   children: [
-                    Text(
-                      'Чувствительность (порог)',
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                    ),
-                    SizedBox(height: 5),
-                    Text(
-                      '${_threshold.toInt()} дБ',
-                      style: TextStyle(fontSize: 24, color: Colors.orange[900]),
-                    ),
+                    Text('Порог срабатывания', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+                    Text('${_threshold.toInt()} дБ', style: TextStyle(fontSize: 20, color: Colors.orange[900])),
                     Slider(
                       value: _threshold,
-                      min: 40,
-                      max: 90,
-                      divisions: 10,
+                      min: 50,
+                      max: 85,
+                      divisions: 7,
                       label: '${_threshold.toInt()} дБ',
                       activeColor: Colors.orange,
-                      onChanged: (value) {
-                        setState(() => _threshold = value);
-                      },
-                    ),
-                    Text(
-                      'Ниже = чувствительнее',
-                      style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                      onChanged: (value) => setState(() => _threshold = value),
                     ),
                   ],
                 ),
               ),
               
-              SizedBox(height: 30),
+              SizedBox(height: 20),
               
-              // Кнопка старт/стоп
+              // КНОПКА
               ElevatedButton(
                 onPressed: _toggleRecording,
                 child: Padding(
                   padding: EdgeInsets.symmetric(horizontal: 30, vertical: 15),
                   child: Text(
-                    _isRecording ? '🛑 Остановить' : '▶️ Начать мониторинг',
-                    style: TextStyle(fontSize: 20),
+                    _isRecording ? 'Остановить' : 'Начать мониторинг',
+                    style: TextStyle(fontSize: 18),
                   ),
                 ),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _isRecording ? Colors.red : Colors.green,
                   foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(30),
-                  ),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
                 ),
               ),
               
-              SizedBox(height: 30),
+              SizedBox(height: 20),
               
-              // История событий
+              // ИСТОРИЯ
               if (_history.isNotEmpty)
                 Container(
                   padding: EdgeInsets.all(15),
@@ -305,22 +425,42 @@ class _MonitorScreenState extends State<MonitorScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        'История событий:',
-                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                      ),
-                      SizedBox(height: 10),
-                      ..._history.map((event) => Padding(
-                        padding: EdgeInsets.symmetric(vertical: 3),
-                        child: Text(
-                          event,
-                          style: TextStyle(fontSize: 14, color: Colors.grey[800]),
-                        ),
+                      Text('История:', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+                      SizedBox(height: 8),
+                      ..._history.map((e) => Padding(
+                        padding: EdgeInsets.symmetric(vertical: 2),
+                        child: Text(e, style: TextStyle(fontSize: 12, color: Colors.grey[800])),
                       )).toList(),
                     ],
                   ),
                 ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildModeButton(String label, DetectionMode mode, Color color) {
+    bool isSelected = _mode == mode;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => _switchMode(mode),
+        child: Container(
+          padding: EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(
+            color: isSelected ? color : Colors.white,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: color, width: 2),
+          ),
+          child: Text(
+            label,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.bold,
+              color: isSelected ? Colors.white : color,
+            ),
           ),
         ),
       ),

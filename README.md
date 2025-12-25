@@ -1,16 +1,29 @@
-# dog_nanny
+# Dog Nanny - Радио-няня для собак
 
-A new Flutter project.
+Мобильное приложение для мониторинга лая собаки с использованием ML и анализа звука.
 
-## Getting Started
+## Возможности
 
-This project is a starting point for a Flutter application.
+-  Детекция лая собаки в реальном времени
+-  Два режима работы:
+  - **Экономный**: Анализ частот (5-10% батареи/час)
+  - **Точный**: ML YAMNet (15-20% батареи/час)
+-  История событий
+-  Настройка чувствительности
+-  Background мониторинг
 
-A few resources to get you started if this is your first Flutter project:
+## Технологии
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+- **Flutter 3.24+** - UI Framework
+- **TensorFlow Lite** - ML inference
+- **YAMNet** - Audio classification model
+- **flutter_sound** - Audio recording
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Требования
+
+- Android 5.0+ (API 24+)
+- 2 GB RAM
+- Разрешение микрофона
+
+## Установка
+
