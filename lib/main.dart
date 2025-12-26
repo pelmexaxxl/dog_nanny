@@ -28,6 +28,8 @@ class _MonitorScreenState extends State<MonitorScreen> {
   final AudioClassifier _classifier = AudioClassifier();
   final AppMonitoring _monitoring = AppMonitoring();
 
+  String? _lastDetectedLabel;
+
   StreamSubscription<List<int>>? _micStream;
   bool _isRecording = false;
   String _status = "Готов к мониторингу";
@@ -172,8 +174,12 @@ class _MonitorScreenState extends State<MonitorScreen> {
     }
     
     var result = await _classifier.classify(_audioBuffer);
-    
+
+    final label = (result['dogSoundLabel'] ?? result['topDogLabel']) as String?;
+    final score = result['confidence'];
+
     print('Результат классификации: $result');
+    print('Что распознано: $label, score=$score');
 
     // ДИАГНОСТИКА: всегда показываем данные
     setState(() {
@@ -199,8 +205,12 @@ class _MonitorScreenState extends State<MonitorScreen> {
         'dominant_freq': result['dominantFreq'],
       });
 
+      // Русифицированные метки
+      String displayLabel = _humanizeLabel(label);
+
       setState(() {
-        _status = "ЛАЙ ОБНАРУЖЕН!";
+        _lastDetectedLabel = displayLabel;
+        _status = "$displayLabel ОБНАРУЖЕН!";
         _freqInfo = "Частота: ${result['dominantFreq']} Гц, Энергия: ${result['energy']}";
         if (result.containsKey('mlScore')) {
           _freqInfo += ", ML: ${result['mlScore']}";
@@ -208,7 +218,7 @@ class _MonitorScreenState extends State<MonitorScreen> {
       });
       
       String method = result['method'];
-      _addToHistory("Лай #$_barkCount - $method");
+      _addToHistory(displayLabel, method, score);
       
       Future.delayed(Duration(seconds: 2), () {
         if (_isRecording) {
@@ -218,17 +228,21 @@ class _MonitorScreenState extends State<MonitorScreen> {
     }
   }
 
-  void _addToHistory(String event) {
+  void _addToHistory(String label, String method, double confidence) {
     setState(() {
       var time = DateTime.now();
       _history.insert(0, {
         'time': "${time.hour}:${time.minute.toString().padLeft(2, '0')}:${time.second.toString().padLeft(2, '0')}",
-        'event': event,
-        'id': DateTime.now().millisecondsSinceEpoch, // Уникальный ID
+        'label': label,
+        'method': method,
+        'confidence': confidence,
+        'id': DateTime.now().millisecondsSinceEpoch,
       });
-      if (_history.length > 20) _history.removeLast(); // Увеличил лимит
+      if (_history.length > 20) _history.removeLast();
     });
   }
+
+
 
   void _removeFromHistory(int index) {
     setState(() {
@@ -542,9 +556,18 @@ class _MonitorScreenState extends State<MonitorScreen> {
                           child: Row(
                             children: [
                               Expanded(
-                                child: Text(
-                                  '${item['time']} - ${item['event']}',
-                                  style: TextStyle(fontSize: 12, color: Colors.grey[800]),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      '${item['time']} - ${item['label']}',
+                                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.grey[900]),
+                                    ),
+                                    Text(
+                                      '${item['method']} • ${(item['confidence'] as double).toStringAsFixed(2)}',
+                                      style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+                                    ),
+                                  ],
                                 ),
                               ),
                               IconButton(
@@ -655,5 +678,19 @@ class _MonitorScreenState extends State<MonitorScreen> {
         ],
       ),
     );
+  }
+  String _humanizeLabel(String? label) {
+    if (label == null) return 'Собачий звук';
+    const aliases = {
+      'Bow-wow': 'Лай (гав-гав)',
+      'Bark': 'Лай',
+      'Howl': 'Вой',
+      'Yip': 'Тявканье',
+      'Growling': 'Рычание',
+      'Whimper (dog)': 'Скулёж',
+      'Dog': 'Собака',
+      'Canidae, dogs, wolves': 'Собака/волк',
+    };
+    return aliases[label] ?? label;
   }
 }

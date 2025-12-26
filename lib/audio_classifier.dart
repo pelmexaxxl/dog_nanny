@@ -4,6 +4,61 @@ import 'dart:math';
 
 enum DetectionMode { economical, precise }
 
+const Map<int, String> kDogClasses = {
+  69: 'Dog',
+  70: 'Bark',
+  71: 'Yip',
+  72: 'Howl',
+  73: 'Bow-wow',
+  74: 'Growling',
+  75: 'Whimper (dog)',
+  117: 'Canidae, dogs, wolves',
+};
+
+String? topLabelFrom(Map<int, String> classes, List<double> probs, {double minScore = 0.0}) {
+  int? bestIndex;
+  double best = minScore;
+  for (final i in classes.keys) {
+    final v = probs[i];
+    if (v > best) {
+      best = v;
+      bestIndex = i;
+    }
+  }
+  return bestIndex == null ? null : classes[bestIndex];
+}
+
+double topScoreFrom(Map<int, String> classes, List<double> probs) {
+  double best = 0.0;
+  for (final i in classes.keys) {
+    final v = probs[i];
+    if (v > best) best = v;
+  }
+  return best;
+}
+
+double dogRelatedScore(List<double> probs) {
+  double best = 0.0;
+  for (final i in kDogClasses.keys) {
+    final v = probs[i];
+    if (v > best) best = v;
+  }
+  return best;
+}
+
+String? topDogLabel(List<double> probs, {double minScore = 0.0}) {
+  int? bestIndex;
+  double best = minScore;
+  for (final i in kDogClasses.keys) {
+    final v = probs[i];
+    if (v > best) {
+      best = v;
+      bestIndex = i;
+    }
+  }
+  return bestIndex == null ? null : kDogClasses[bestIndex];
+}
+
 class AudioClassifier {
   Interpreter? _interpreter;
   DetectionMode _mode = DetectionMode.economical;
@@ -120,60 +175,113 @@ class AudioClassifier {
         'freqRatio': freqRatio.toStringAsFixed(2),
       };
     } else {
-      // Точный: частоты + YAMNet (строгая комбинация)
-      
-      List<double> waveform = _prepareWaveform(pcmData);
-      
-      var input = [waveform];
-      var output = List.filled(1 * 521, 0.0).reshape([1, 521]);
-      
+      // Точный: YAMNet + минимальная проверка "не тишина"
+      final List<double> waveform = _prepareWaveform(pcmData);
+
+      final input = [waveform];
+      final output = List.filled(1 * 521, 0.0).reshape([1, 521]);
+
+      // Порог подбери под себя
+      const double mlThreshold = 0.08;
+      const double silenceEnergyThreshold = 0.2;
+
+      // Более "конкретные" собачьи вокализации (чтобы чаще получать Bark/Howl/…)
+      const Map<int, String> kDogVocalClasses = {
+        70: 'Bark',
+        71: 'Yip',
+        72: 'Howl',
+        73: 'Bow-wow',
+        74: 'Growling',
+        75: 'Whimper (dog)',
+      };
+
+      int? _topIndexFrom(Map<int, String> classes, List<double> probs) {
+        int? bestIndex;
+        double best = 0.0;
+        for (final i in classes.keys) {
+          final v = probs[i];
+          if (v > best) {
+            best = v;
+            bestIndex = i;
+          }
+        }
+        return bestIndex;
+      }
+
+      double _topScoreFrom(Map<int, String> classes, List<double> probs) {
+        double best = 0.0;
+        for (final i in classes.keys) {
+          final v = probs[i];
+          if (v > best) best = v;
+        }
+        return best;
+      }
+
       try {
         _interpreter!.run(input, output);
-        
-        // YAMNet классы: 75 = Dog, 76 = Bark
-        double dogConfidence = output[0][75];
-        double barkConfidence = output[0].length > 76 ? output[0][76] : 0.0;
-        double maxConfidence = dogConfidence > barkConfidence ? dogConfidence : barkConfidence;
-        
-        print('YAMNet scores - Dog: $dogConfidence, Bark: $barkConfidence');
-        
-        // СТРОГИЕ КРИТЕРИИ:
-        // 1. Частоты идеальны (500-1800 Гц)
-        // 2. Центроид в диапазоне (900-2200 Гц)  
-        // 3. Энергия умеренная (0.5-5.0)
-        // 4. ML ОБЯЗАТЕЛЬНО подтверждает (>0.08)
 
-        bool freqMatch = dominantFreq >= 500 && dominantFreq <= 1800;
-        bool centroidMatch = spectralCentroid >= 900 && spectralCentroid <= 2200;
-        bool energyMatch = energy > 0.5 && energy < 5.0;
-        bool mlConfirms = maxConfidence > 0.08;
+        final List<double> probs = List<double>.from(output[0]); // 521 scores
 
-        // ВСЕ 4 условия обязательны
-        bool isDogBark = freqMatch && centroidMatch && energyMatch && mlConfirms;
+        // Любой собачий звук (включая общие классы Dog/Canidae)
+        final double anyDogScore = dogRelatedScore(probs);
+        final String? anyDogLabel = topDogLabel(probs);
 
-        
+        // Попытка дать "более конкретное" описание: Bark/Howl/Growling/Whimper/...
+        final int? vocalTopIndex = _topIndexFrom(kDogVocalClasses, probs);
+        final double vocalTopScore = _topScoreFrom(kDogVocalClasses, probs);
+        final String? vocalTopLabel =
+            (vocalTopIndex == null) ? null : kDogVocalClasses[vocalTopIndex];
+
+        final bool notSilent = energy > silenceEnergyThreshold;
+        final bool mlConfirms = anyDogScore > mlThreshold;
+
+        // Любой собачий звук
+        final bool isDogBark = mlConfirms && notSilent;
+
+        // Что именно распознано:
+        // - если среди "вокализаций" уверенность хорошая, показываем её (Bark/Howl/…)
+        // - иначе показываем более общий top label из dogRelated (может быть Dog/Canidae)
+        final String? detectedLabel =
+            (vocalTopLabel != null && vocalTopScore > mlThreshold)
+                ? vocalTopLabel
+                : anyDogLabel;
+
+        print(
+          'YAMNet dog-scores: anyDogScore=$anyDogScore anyDogLabel=$anyDogLabel '
+          'vocalTop=$vocalTopLabel vocalScore=$vocalTopScore '
+          'energy=$energy notSilent=$notSilent',
+        );
+
         return {
-          'isDogBark': isDogBark,
-          'confidence': maxConfidence,
+          'isDogBark': isDogBark, // ключ можно оставить, чтобы не ломать UI
+          'confidence': anyDogScore,
           'method': 'ml_yamnet',
+
+          // "что именно" (лай/вой/рычание/скулёж/...)
+          'dogSoundLabel': isDogBark ? detectedLabel : null,
+
+          // отладка / аналитика
+          'mlScore': anyDogScore.toStringAsFixed(3),
+          'vocalLabel': vocalTopLabel,
+          'vocalScore': vocalTopScore.toStringAsFixed(3),
+          'notSilent': notSilent,
+
+          // твои фичи (можно оставить для UI/логов)
           'dominantFreq': dominantFreq.toInt(),
           'energy': (energy * 100).toStringAsFixed(1),
           'spectralCentroid': spectralCentroid.toInt(),
-          'mlScore': maxConfidence.toStringAsFixed(2),
-          'dogScore': dogConfidence.toStringAsFixed(3),
-          'barkScore': barkConfidence.toStringAsFixed(3),
         };
       } catch (e) {
         print('ML ошибка: $e');
-        // Fallback на частоты (строгий)
-        bool isDogBark = dominantFreq >= 500 && dominantFreq <= 1800 &&
-                        spectralCentroid >= 900 && spectralCentroid <= 2200 &&
-                        energy > 1.0 && energy < 5.0;
+
+        // Если ML упал, честнее вернуть "не могу классифицировать" (а не частотные эвристики под лай)
         return {
-          'isDogBark': isDogBark,
-          'confidence': 0.5,
-          'method': 'frequency_fallback',
+          'isDogBark': false,
+          'confidence': 0.0,
+          'method': 'ml_error',
           'dominantFreq': dominantFreq.toInt(),
+          'energy': (energy * 100).toStringAsFixed(1),
+          'spectralCentroid': spectralCentroid.toInt(),
         };
       }
     }
